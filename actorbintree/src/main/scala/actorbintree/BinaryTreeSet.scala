@@ -4,6 +4,7 @@
 package actorbintree
 
 import akka.actor._
+import akka.util._
 import scala.collection.immutable.Queue
 import akka.pattern.{ ask, pipe }
 
@@ -54,6 +55,8 @@ object BinaryTreeSet {
 class BinaryTreeSet extends Actor {
   import BinaryTreeSet._
   import BinaryTreeNode._
+
+  implicit val timeout = Timeout(50000L, java.util.concurrent.TimeUnit.SECONDS)
 
   def createRoot: ActorRef = context.actorOf(BinaryTreeNode.props(0, initiallyRemoved = true))
 
@@ -161,8 +164,8 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
         val leftTreeOp = subtrees get Left
         leftTreeOp match {
           case Some(ref) =>
-            val x = ref ? Contains(requester, id, elemIn)
-            if (x == ContainsResult(id = id, true)) found = true
+            val future  = ref ? Contains(requester, id, elemIn)
+            if (future == ContainsResult(id = id, true)) found = true
           case _ =>
         }
         val rightTreeOp = subtrees get Right
