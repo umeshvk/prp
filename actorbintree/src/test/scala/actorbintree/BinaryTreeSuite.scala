@@ -10,6 +10,8 @@ import org.scalatest.Matchers
 import scala.util.Random
 import scala.concurrent.duration._
 import org.scalatest.FunSuiteLike
+import scala.language.postfixOps
+
 
 class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSuiteLike with Matchers with BeforeAndAfterAll with ImplicitSender
 {
@@ -21,8 +23,9 @@ class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSui
   import actorbintree.BinaryTreeSet._
 
   def receiveN(requester: TestProbe, ops: Seq[Operation], expectedReplies: Seq[OperationReply]): Unit =
-    requester.within(5.seconds) {
+    requester.within(5000 seconds) {
       val repliesUnsorted = for (i <- 1 to ops.size) yield try {
+        println("Got reply number: " + i)
         requester.expectMsgType[OperationReply]
       } catch {
         case ex: Throwable if ops.size > 10 => fail(s"failure to receive confirmation $i/${ops.size}", ex)
@@ -50,18 +53,54 @@ class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSui
 
   }
 
+
+  test("remove non-existing node") {
+    val topNode = system.actorOf(Props[BinaryTreeSet])
+    topNode ! Remove(testActor, id = 701, -1)
+    expectMsg(3 second, OperationFinished(701))
+  }
+
   test("proper inserts and lookups") {
 
     val topNode = system.actorOf(Props[BinaryTreeSet])
 
-    topNode ! Contains(testActor, id = 1, 1)
-    expectMsg(ContainsResult(1, false))
+    topNode ! Insert(testActor, id = 2, 100)
+    expectMsg(1 hour, OperationFinished(2))
 
-    topNode ! Insert(testActor, id = 2, 1)
+    topNode ! Insert(testActor, id = 200, -1)
+    expectMsg(1 hour, OperationFinished(200))
+
+    topNode ! Insert(testActor, id = 201, -100)
+    expectMsg(1 hour, OperationFinished(201))
+
+    topNode ! Insert(testActor, id = 202, 1)
+    expectMsg(1 hour, OperationFinished(202))
+
+    topNode ! Insert(testActor, id = 203, 6)
+    expectMsg(1 hour, OperationFinished(203))
+
+    topNode ! Insert(testActor, id = 204, -3)
+    expectMsg(1 hour, OperationFinished(204))
+
+    topNode ! Insert(testActor, id = 205, -2)
+    expectMsg(1 hour, OperationFinished(205))
+
+    topNode ! Print(testActor, id = 100, elem = 0, "Root:")
+
+    topNode ! Contains(testActor, id = 3, -1)
+    expectMsg(1 hour, ContainsResult(3, true))
+
+    topNode ! Remove(testActor, id = 301, -1)
+    expectMsg(1 hour, OperationFinished(301))
+
+    topNode ! Contains(testActor, id = 302, -1)
+    expectMsg(1 hour, ContainsResult(302, false))
+
+    println("Test Completed")
+    /*
     topNode ! Contains(testActor, id = 3, 1)
-
-    expectMsg(OperationFinished(2))
-    expectMsg(ContainsResult(3, true))
+    expectMsg(1 hour, ContainsResult(3, true))
+    */
   }
 
   test("instruction example") {
@@ -79,10 +118,11 @@ class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSui
     val expectedReplies = List(
       OperationFinished(id=10),
       OperationFinished(id=20),
-      ContainsResult(id=50, false),
+      ContainsResult(id=50, false) ,
       ContainsResult(id=70, true),
       ContainsResult(id=80, false),
       OperationFinished(id=100)
+
       )
 
     verify(requester, ops, expectedReplies)

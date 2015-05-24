@@ -3,10 +3,19 @@
  */
 package actorbintree
 
+import common.MyLogger
 import akka.actor._
 import akka.util._
 import scala.collection.immutable.Queue
 import akka.pattern.{ ask, pipe }
+import scala.concurrent.duration._
+
+import scala.language.postfixOps
+import scala.concurrent.ExecutionContext.Implicits.global
+
+import scala.concurrent.Await
+import scala.util._
+
 
 object BinaryTreeSet {
 
@@ -41,6 +50,8 @@ object BinaryTreeSet {
   /** Request to perform garbage collection*/
   case object GC
 
+  case class Print(requester: ActorRef, id: Int, elem: Int, str: String) extends Operation
+
   /** Holds the answer to the Contains request with identifier `id`.
     * `result` is true if and only if the element is present in the tree.
     */
@@ -53,10 +64,11 @@ object BinaryTreeSet {
 
 
 class BinaryTreeSet extends Actor {
+
   import BinaryTreeSet._
   import BinaryTreeNode._
 
-  implicit val timeout = Timeout(50000L, java.util.concurrent.TimeUnit.SECONDS)
+  implicit val timeout = Timeout(60L, java.util.concurrent.TimeUnit.SECONDS)
 
   def createRoot: ActorRef = context.actorOf(BinaryTreeNode.props(0, initiallyRemoved = true))
 
@@ -69,22 +81,69 @@ class BinaryTreeSet extends Actor {
   def receive = normal
 
 
+  //Await at the Actor for BinaryTreeSet
+  //Thread.sleep(10000)
+  //val b = future.isCompleted
+  //MyLogger.println1(s"Is Completed:$b")
+
   // optional
   /** Accepts `Operation` and `GC` messages. */
   val normal: Receive = {
-      case Insert(requester: ActorRef, id: Int, elem: Int) =>
-        root ! Insert(requester, id, elem)
-      case Contains(requester: ActorRef, id: Int, elem: Int) =>
-        root ! Contains(requester, id, elem)
-      case Remove(requester: ActorRef, id: Int, elem: Int) =>
-        root ! Remove(requester, id, elem)
-      case GC =>
-        println("GC requested")
-        val newRoot = createRoot
-        context.become(garbageCollecting(newRoot))
+    case Print(requester: ActorRef, id: Int, elem: Int, str: String) =>
+      root ! Print(requester, id, elem, str)
+    case Insert(requester: ActorRef, id: Int, elem: Int) =>
+      MyLogger.println1("Start Insert:" + Insert(requester: ActorRef, id: Int, elem: Int))
+      root ! Insert(requester, id, elem)
+
+    case Contains(requester: ActorRef, id: Int, elem: Int) =>
+      val contains = containsElement(requester, id, elem)
+      if(contains)
+        requester ! ContainsResult(id, true)
+      else
+        requester ! ContainsResult(id, false)
+
+    case Remove(requester: ActorRef, id: Int, elem: Int) =>
+      val contains = containsElement(requester, id, elem)
+      if(!contains) {
+        requester ! OperationFinished(id)
+      }
+      root ! Remove(requester, id, elem)
+
+    case GC =>
+      MyLogger.println1("GC requested")
+      val newRoot = createRoot
+      context.become(garbageCollecting(newRoot))
 
   }
 
+  def containsElement(requester: ActorRef, id: Int, elem: Int) : Boolean = {
+    MyLogger.println1("Requestor:" + requester)
+    MyLogger.println1("Initiated Contains Requestor:" + self)
+    val future = root ? Contains(requester, id, elem)
+    val tryVal = Try{Await.result(future, Duration.Inf)}
+    tryVal match {
+      case Success(x) if(x == ContainsResult(id, true))=>
+        MyLogger.println1("Success id=" + id)
+        true
+      case xxx =>
+        MyLogger.println1("No match id=" + id + "result=" + xxx)
+        false
+    }
+    /**
+    MyLogger.println1("Requestor:" + requester)
+    MyLogger.println1("Initiated Contains Requestor:" + self)
+    val future = root ? Contains(requester, id, elem)
+    val tryVal = Try{Await.result(future, Duration.Inf)}
+    tryVal match {
+      case Success(x) if(x == ContainsResult(id, true))=>
+        MyLogger.println1("Success id=" + id)
+        requester ! ContainsResult(id, true)
+      case xxx =>
+        MyLogger.println1("No match id=" + id + "result=" + xxx)
+        requester ! ContainsResult(id, false)
+    }
+      **/
+  }
   // optional
   /** Handles messages while garbage collection is performed.
     * `newRoot` is the root of the new binary tree where we want to copy
@@ -94,137 +153,15 @@ class BinaryTreeSet extends Actor {
     case operation: Operation =>
       pendingQueue enqueue operation
     case GC =>
-      root ?  CopyTo(newRoot)
+      root ? CopyTo(newRoot)
+      context.stop(root)
       root = newRoot
       context.unbecome()
-
-
-}
-
-object BinaryTreeNode {
-  trait Position
-
-  case object Left extends Position
-  case object Right extends Position
-
-  case class CopyTo(treeNode: ActorRef)
-  case object CopyFinished
-
-  def props(elem: Int, initiallyRemoved: Boolean) = Props(classOf[BinaryTreeNode],  elem, initiallyRemoved)
-}
-
-class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
-  import BinaryTreeNode._
-  import BinaryTreeSet._
-
-  var subtrees = Map[Position, ActorRef]()
-  var removed = initiallyRemoved
-
-  // optional
-  def receive = normal
-
-  // optional
-  /** Handles `Operation` messages and `CopyTo` requests. */
-  val normal: Receive = {
-    case Insert(requester: ActorRef, id: Int, elemIn: Int) =>
-      if(elemIn <= elem) {
-        val leftTreeOp = subtrees get Left
-        leftTreeOp match {
-          case Some(ref) =>
-            ref ! Insert(requester: ActorRef, id: Int, elemIn: Int)
-          case None =>
-            val leftTree = context.actorOf(BinaryTreeNode.props(elemIn, initiallyRemoved = false))
-            val rightTree = subtrees get Right
-            rightTree match {
-              case None => subtrees = Map(Left -> leftTree)
-              case Some(ref) => subtrees = Map(Left -> leftTree, Right -> ref)
-            }
-            requester ! OperationFinished(id=id)
-        }
-      } else {
-        val rightTreeOp = subtrees get Right
-        rightTreeOp match {
-          case Some(ref) =>
-            ref ! Insert(requester, id, elemIn)
-          case None =>
-            val rightTree = context.actorOf(BinaryTreeNode.props(elemIn, initiallyRemoved = false))
-            val leftTree = subtrees get Left
-            leftTree match {
-              case None => subtrees = Map(Right -> rightTree)
-              case Some(ref) => subtrees = Map(Left -> ref, Right -> rightTree)
-            }
-            requester ! OperationFinished(id=id)
-        }
+      pendingQueue foreach {
+        x =>
+          self ! x
       }
-    case Contains(requester: ActorRef, id: Int, elemIn: Int) =>
-      if(elemIn == elem) {
-        requester ! ContainsResult(id=id, true)
-      } else {
-        var found = false
-        val leftTreeOp = subtrees get Left
-        leftTreeOp match {
-          case Some(ref) =>
-            val future  = ref ? Contains(requester, id, elemIn)
-            if (future == ContainsResult(id = id, true)) found = true
-          case _ =>
-        }
-        val rightTreeOp = subtrees get Right
-        rightTreeOp match {
-          case Some(ref) =>
-            val x = ref ? Contains(requester, id, elemIn)
-            if (x == ContainsResult(id = id, true)) found = true
-          case _ =>
-        }
-        if (found) ContainsResult(id = id, true) else ContainsResult(id = id, false)
-      }
-    case Remove(requester: ActorRef, id: Int, elemIn: Int) =>
-      if(elemIn == elem) {
-        removed = true
-      } else {
-        val leftTreeOp = subtrees get Left
-        leftTreeOp match {
-          case Some(ref) =>
-            val x = ref ! Remove(requester, id, elemIn)
-          case _ =>
-        }
-        val rightTreeOp = subtrees get Right
-        rightTreeOp match {
-          case Some(ref) =>
-            val x = ref ! Remove(requester, id, elemIn)
-          case _ =>
-        }
-      }
-
-      requester ! OperationFinished(id=id)
-
-    case CopyTo(treeNode: ActorRef) =>
-      treeNode ? Insert(treeNode, 1, elem)
-      val leftTreeOp = subtrees get Left
-      leftTreeOp match {
-        case Some(ref) =>
-          val x = ref ?  CopyTo(treeNode)
-        case _ =>
-      }
-      val rightTreeOp = subtrees get Right
-      rightTreeOp match {
-        case Some(ref) =>
-          val x = ref ?  CopyTo(treeNode)
-        case _ =>
-      }
-
   }
 
-
-
-  // optional
-  /** `expected` is the set of ActorRefs whose replies we are waiting for,
-    * `insertConfirmed` tracks whether the copy of this node to the new tree has been confirmed.
-    */
-  def copying(expected: Set[ActorRef], insertConfirmed: Boolean): Receive = {
-    case _ =>
-    //xxx
-  }
 }
 
-
-}
