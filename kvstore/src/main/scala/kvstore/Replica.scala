@@ -61,7 +61,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   var counter = 0
 
   var primaryPersistingAcks = Map.empty[Long, (ActorRef, Cancellable)]
+  //Key is id of the operation: insert, remove, get
+  //Value is (ClientRef, NumberOfSecondaryRefs at point of replication request to replicator)
   var replicationAcks = Map.empty[Long, (ActorRef, Long)]
+  //Key is replicator actor ref
   var replicatorAcks = new HashMap[ActorRef, collection.mutable.Set[Long]] with MultiMap[ActorRef, Long]
 
   arbiter ! Join
@@ -84,11 +87,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       remove(key, id)
     case Get(key, id) =>
       get(key, id)
+    //From Arbiter
     case Replicas(replicas) =>
-      //From Arbiter
       arbiterInforms(replicas)
+    //From Replicator
     case Replicated(key, id) =>
-      //From Replicator
       replicatorReplicated(key, id)
     case Persisted(key, id) =>
       persistConfirm(key, id)
@@ -108,7 +111,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     }
 
     val cancellable: Cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, Some(value), id))
-    primaryPersistingAcks += (id -> (sender, cancellable))
+    primaryPersistingAcks += (id -> (sender /* ClientRef */, cancellable))
 
     context.system.scheduler.scheduleOnce(1 second) {
       primaryPersistingAcks get id match {
@@ -135,20 +138,21 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
     if (!secondaryReplicatorRefSet.isEmpty) {
       replicationAcks += id -> (sender, secondaryReplicatorRefSet.size)
-      secondaryReplicatorRefSet foreach { r =>
-        replicatorAcks.addBinding(r, id)
-        r ! Replicate(key, None, id)
+      secondaryReplicatorRefSet foreach { replicatorRef =>
+        replicatorAcks.addBinding(replicatorRef, id)
+        replicatorRef ! Replicate(key, None, id)
       }
     }
 
-    primaryPersistingAcks += id -> (sender, context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, None, id)))
+    val cancellable : Cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, None, id))
+    primaryPersistingAcks += id -> (sender /* Client Ref */, cancellable)
 
     context.system.scheduler.scheduleOnce(1 second) {
       primaryPersistingAcks get id match {
-        case Some((s, c)) => {
-          c.cancel
+        case Some((clientRef, cancellable)) => {
+          cancellable.cancel
           primaryPersistingAcks -= id
-          s ! OperationFailed(id)
+          clientRef ! OperationFailed(id)
         }
         case None => {
           replicationAcks get id match {
@@ -261,7 +265,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       else if (seq == expectedSeq) {
         valueOption match {
           case Some(value) => {
+            //Add in memory
             cache += key -> value
+            //Add to disk
             val cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, Some(value), seq))
             secondaryPersistingAcks +=
               seq -> (sender,
@@ -269,8 +275,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
                       cancellable)
           }
           case None => {
+            //Remove from memory
             cache -= key
-            secondaryPersistingAcks += seq -> (sender, key, context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, None, seq)))
+            //Add to disk
+            val cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, None, seq))
+            secondaryPersistingAcks += seq -> (sender, key, cancellable)
           }
         }
         expectedSeq += 1

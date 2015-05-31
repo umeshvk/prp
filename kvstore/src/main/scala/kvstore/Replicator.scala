@@ -16,6 +16,11 @@ object Replicator {
   def props(replica: ActorRef): Props = Props(new Replicator(replica))
 }
 
+/**
+ * One on one mapping from replicator to replica(secondary)
+ * Primary replica has no associated replicator
+ * @param replica
+ */
 //Send Message List:
 //Receive Message List:
 class Replicator(val replica: ActorRef) extends Actor with ActorLogging{
@@ -52,12 +57,13 @@ class Replicator(val replica: ActorRef) extends Actor with ActorLogging{
     //Get this messages from secondary replica
     case SnapshotAck(key, seq) => {
       acks get seq match {
-        case Some((s, Replicate(k, valueOption, id), cancellable)) => {
+        case Some((senderOriginal, Replicate(k, valueOption, id), cancellable)) => {
           cancellable.cancel
-          s ! Replicated(k, id)
+          senderOriginal ! Replicated(k, id)
         }
         case None =>
       }
+      acks -= seq
     }
   }
 

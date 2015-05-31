@@ -15,6 +15,17 @@ object Arbiter {
   case class Replicas(replicas: Set[ActorRef])
 }
 
+/**
+ * The Arbiter is created before anything else and it waits for the Replicas to announce themselves.
+ * The actor ref of the arbiter is passed to the replicas as they are created.
+ * Once the arbiter and at least one replica is created then it is time to start sending insert, remove and get commands
+ * First replica becomes the primary replica.
+ * Primary replica does not need a replicator.
+ * It maintains a cache (key value map in memory). It also persists the key and value to to Persistor.
+ * It also maintains the complete set of actor refs to all replicas
+ * By sending the Replica message to the primary replica the primary replica is able to derive the secondary refs
+ *
+ */
 //Send Message List: (To Primary Replica: Replicas(Set[ActorRef])) ( To Primary Replica: JoinedPrimary) ( To Secondary Replica: JoinedSecondary)
 //Receive Message List: Join
 class Arbiter extends Actor {
@@ -32,7 +43,9 @@ class Arbiter extends Actor {
         replicas += sender
         sender ! JoinedSecondary
       }
-      leader foreach (_ ! Replicas(replicas))
+      leader foreach { ref =>
+        ref ! Replicas(replicas)
+      }
   }
 
 }
