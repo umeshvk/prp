@@ -15,6 +15,8 @@ object Arbiter {
   case class Replicas(replicas: Set[ActorRef])
 }
 
+//Send Message List: (To Primary Replica: Replicas(Set[ActorRef])) ( To Primary Replica: JoinedPrimary) ( To Secondary Replica: JoinedSecondary)
+//Receive Message List: Join
 class Arbiter extends Actor {
   import Arbiter._
   var leader: Option[ActorRef] = None
