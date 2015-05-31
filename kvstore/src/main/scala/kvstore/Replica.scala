@@ -71,7 +71,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
 
   var expectedSeq = 0L
-  var secondaryPersistingAcks = Map.empty[Long, (ActorRef, String, Cancellable)]
+  var secondaryPersistingAcks = Map.empty[Long, (ActorRef, Cancellable)]
 
 
   def receive = LoggingReceive {
@@ -115,8 +115,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
     context.system.scheduler.scheduleOnce(1 second) {
       primaryPersistingAcks get id match {
-        case Some((s, c)) => {
-          c.cancel
+        case Some((s, cancellable)) => {
+          cancellable.cancel
           primaryPersistingAcks -= id
           s ! OperationFailed(id)
         }
@@ -217,21 +217,21 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   def replicatorReplicated(key: String, id: Long) :Unit = {
     replicatorAcks get sender match {
-      case Some(s) => {
-        s-= id
+      case Some(boundIdSet) => {
+        boundIdSet -= id
       }
       case None =>
     }
     replicationAcks get id match {
-      case Some((s, v)) => {
-        val newValue = v - 1
+      case Some((clientRef, replicatorRefCount)) => {
+        val newValue = replicatorRefCount - 1
         if (newValue == 0) {
           replicationAcks -= id
           if (!(primaryPersistingAcks contains id)) {
-            s ! OperationAck(id)
+            clientRef ! OperationAck(id)
           }
         } else {
-          replicationAcks += id -> (s, newValue)
+          replicationAcks += id -> (clientRef, newValue)
         }
       }
       case None =>
@@ -240,8 +240,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   def persistConfirm(key: String, id: Long) : Unit = {
     primaryPersistingAcks get id match {
-      case Some((s, c)) => {
-        c.cancel
+      case Some((s, cancellable)) => {
+        cancellable.cancel
         primaryPersistingAcks -= id
         if (!(replicationAcks contains id)) {
           s ! OperationAck(id)
@@ -254,44 +254,51 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   /* TODO Behavior for the replica role. */
   val secondaryReplica: Receive = LoggingReceive {
 
+    //Message from Client
     case Get(key, id) => {
       val value: Option[String] = cache get key
       sender ! GetResult(key, value, id)
     }
+
+    //Message from Replicator in Primary Replica
     case Snapshot(key, valueOption, seq) => {
       if (seq < expectedSeq) {
         sender ! SnapshotAck(key, seq)
       }
       else if (seq == expectedSeq) {
         valueOption match {
+
+          //Insert this value from cache and persistor
           case Some(value) => {
             //Add in memory
             cache += key -> value
             //Add to disk
             val cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, Some(value), seq))
             secondaryPersistingAcks +=
-              seq -> (sender,
-                      key,
+              seq -> (sender, /** Replicator Ref **/
                       cancellable)
           }
+
+          //Remove this value from cache and persistor
           case None => {
             //Remove from memory
             cache -= key
             //Add to disk
             val cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, None, seq))
-            secondaryPersistingAcks += seq -> (sender, key, cancellable)
+            secondaryPersistingAcks += seq -> (sender,  /** Replicator Ref **/
+                                                cancellable)
           }
         }
         expectedSeq += 1
       } else {
-        println("")
+        log.info("Do nothing seq= {} and expectedSeq = {}", seq, expectedSeq)
       }
     }
-
+    //Message from Persistor
     case Persisted(key, id) => {
       secondaryPersistingAcks get id match {
-        case Some((replicator, k, c)) => {
-          c.cancel
+        case Some((replicator, cancellable)) => {
+          cancellable.cancel
           secondaryPersistingAcks -= id
           replicator ! SnapshotAck(key, id)
         }
