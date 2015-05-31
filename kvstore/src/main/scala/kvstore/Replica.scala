@@ -34,6 +34,7 @@ object Replica {
 
 
 //Primary Send Message List: ( To Client: OperationAck(id), OperationFailed(id), GetResult(key, valueOption, id) )
+//contd//
 //Primary Receive Message List: (From Client : INSERT(key, value, id), REMOVE(key, id), Get(key, id))
 //Secondary Send Message List: ( To Client: GetResult(key, valueOption, id) )
 //Secondary Receive Message List: (From Client :  Get(key, id))
@@ -47,15 +48,15 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
    */
   
-  var kv = Map.empty[String, String]
+  var cache = Map.empty[String, String]
   // a map from secondary replicas to replicators
-  var secondaries = Map.empty[ActorRef, ActorRef]
+  var secondaryReplicaToReplicatorMap = Map.empty[ActorRef, ActorRef]
   // the current set of replicators
-  var replicators = Set.empty[ActorRef]
+  var secondaryReplicatorRefSet = Set.empty[ActorRef]
 
 
   val persistor = context.system.actorOf(persistenceProps)
-
+  context.watch(persistor)
 
   var counter = 0
 
@@ -96,17 +97,18 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   }
 
   def insert(key: String, value: String, id: Long) : Unit = {
-    kv += key -> value
+    cache += (key -> value)
 
-    if (!replicators.isEmpty) {
-      replicationAcks += id -> (sender, replicators.size)
-      replicators foreach { r =>
-        replicatorAcks.addBinding(r, id)
-        r ! Replicate(key, Some(value), id)
+    if (!secondaryReplicatorRefSet.isEmpty) {
+      replicationAcks += (id -> (sender, secondaryReplicatorRefSet.size))
+      secondaryReplicatorRefSet foreach { replicatorRef =>
+        replicatorAcks.addBinding(replicatorRef, id)
+        replicatorRef ! Replicate(key, Some(value), id)
       }
     }
 
-    primaryPersistingAcks += id -> (sender, context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, Some(value), id)))
+    val cancellable: Cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, Some(value), id))
+    primaryPersistingAcks += (id -> (sender, cancellable))
 
     context.system.scheduler.scheduleOnce(1 second) {
       primaryPersistingAcks get id match {
@@ -129,11 +131,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   }
 
   def remove(key: String, id: Long) : Unit = {
-    kv -= key
+    cache -= key
 
-    if (!replicators.isEmpty) {
-      replicationAcks += id -> (sender, replicators.size)
-      replicators foreach { r =>
+    if (!secondaryReplicatorRefSet.isEmpty) {
+      replicationAcks += id -> (sender, secondaryReplicatorRefSet.size)
+      secondaryReplicatorRefSet foreach { r =>
         replicatorAcks.addBinding(r, id)
         r ! Replicate(key, None, id)
       }
@@ -162,39 +164,44 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   }
 
   def get(key: String, id: Long) : Unit =  {
-    val value: Option[String] = kv get key
+    val value: Option[String] = cache get key
     sender ! GetResult(key, value, id)
   }
 
   def arbiterInforms(replicas: Set[ActorRef]) : Unit = {
 
-    val secs = replicas - self
-    val newJoiners = secs -- secondaries.keySet
-    val leavers =  secondaries.keySet -- secs
+    val secondaryActorRefs = replicas - self
+    assert(secondaryActorRefs.size == (replicas.size -1))
+    val joinedSet = secondaryActorRefs -- secondaryReplicaToReplicatorMap.keySet
+    log.info("Numbers of joiners: {}", joinedSet.size)
+    val leftSet =  secondaryReplicaToReplicatorMap.keySet -- secondaryActorRefs
+    log.info("Numbers of leavers: {}", leftSet.size)
 
-    newJoiners foreach { nj =>
-      val r = context.system.actorOf(Replicator.props(nj))
-      secondaries += nj -> r
-      replicators += r
-      kv foreach { e =>
-        r ! Replicate(e._1, Some(e._2), counter)
-        counter += 1
-      }
+    joinedSet foreach {
+      newSecondaryReplicaRef =>
+        val secondaryReplicatorRef = context.system.actorOf(Replicator.props(newSecondaryReplicaRef))
+        context.watch(secondaryReplicatorRef)
+        secondaryReplicaToReplicatorMap += newSecondaryReplicaRef -> secondaryReplicatorRef
+        secondaryReplicatorRefSet += secondaryReplicatorRef
+        cache foreach { kvTuple =>
+          secondaryReplicatorRef ! Replicate(kvTuple._1, Some(kvTuple._2), counter)
+          counter += 1
+        }
     }
 
-    leavers foreach { l =>
-      secondaries get l match {
-        case Some(r) => {
-          context.stop(r)
-          secondaries -= l
-          replicators -= r
+    leftSet foreach { leftActorRef =>
+      secondaryReplicaToReplicatorMap get leftActorRef match {
+        case Some(replicatorRef) => {
+          context.stop(replicatorRef)
+          secondaryReplicaToReplicatorMap -= leftActorRef
+          secondaryReplicatorRefSet -= replicatorRef
 
-          replicatorAcks get r match {
+          replicatorAcks get replicatorRef match {
             case Some(outstandingAcks) => {
               outstandingAcks foreach { a =>
                 self ! Replicated("", a)
               }
-              replicatorAcks -= r
+              replicatorAcks -= replicatorRef
             }
             case None =>
           }
@@ -244,7 +251,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   val secondaryReplica: Receive = LoggingReceive {
 
     case Get(key, id) => {
-      val value: Option[String] = kv get key
+      val value: Option[String] = cache get key
       sender ! GetResult(key, value, id)
     }
     case Snapshot(key, valueOption, seq) => {
@@ -254,7 +261,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       else if (seq == expectedSeq) {
         valueOption match {
           case Some(value) => {
-            kv += key -> value
+            cache += key -> value
             val cancellable = context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, Some(value), seq))
             secondaryPersistingAcks +=
               seq -> (sender,
@@ -262,7 +269,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
                       cancellable)
           }
           case None => {
-            kv -= key
+            cache -= key
             secondaryPersistingAcks += seq -> (sender, key, context.system.scheduler.schedule(0 milliseconds, 100 milliseconds, persistor, Persist(key, None, seq)))
           }
         }

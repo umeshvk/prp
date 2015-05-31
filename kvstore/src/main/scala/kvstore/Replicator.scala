@@ -42,11 +42,14 @@ class Replicator(val replica: ActorRef) extends Actor with ActorLogging{
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive = LoggingReceive {
+    //Get this message from Primary Replica
     case Replicate(key, valueOption, id) => {
       val seq = nextSeq
       val cancellable = context.system.scheduler.schedule(0 milliseconds, 200 milliseconds, replica, Snapshot(key, valueOption, seq))
-      acks += seq -> (sender, Replicate(key, valueOption, id), cancellable)
+      acks += (seq -> (sender, Replicate(key, valueOption, id), cancellable))
     }
+
+    //Get this messages from secondary replica
     case SnapshotAck(key, seq) => {
       acks get seq match {
         case Some((s, Replicate(k, valueOption, id), cancellable)) => {
