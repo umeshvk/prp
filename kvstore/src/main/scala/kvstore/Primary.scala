@@ -13,9 +13,8 @@ import kvstore.Replica._
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
-/**
- * Created by umesh on 5/31/15.
- */
+
+
 trait Primary {
   this: Replica =>
 
@@ -23,6 +22,11 @@ trait Primary {
   import Replicator._
   import Persistence._
   import context.dispatcher
+
+  var primaryPersistingAcks = Map.empty[Long, (ActorRef, Cancellable)]
+
+  var counter = 0
+
 
   /* TODO Behavior for  the leader role. */
   val leader: Receive = LoggingReceive {
@@ -38,6 +42,7 @@ trait Primary {
     //From Replicator
     case Replicated(key, id) =>
       replicatorReplicated(key, id)
+    //From Persistor
     case Persisted(key, id) =>
       persistConfirm(key, id)
     case _ => log.info("Got message in primary replica")
@@ -101,9 +106,9 @@ trait Primary {
         }
         case None => {
           replicationAcks get id match {
-            case Some((s, c)) => {
+            case Some((clientRef, cancellable)) => {
               replicationAcks -= id
-              s ! OperationFailed(id)
+              clientRef ! OperationFailed(id)
             }
             case None =>
           }
@@ -185,11 +190,11 @@ trait Primary {
 
   def persistConfirm(key: String, id: Long) : Unit = {
     primaryPersistingAcks get id match {
-      case Some((s, cancellable)) => {
+      case Some((clientRef, cancellable)) => {
         cancellable.cancel
         primaryPersistingAcks -= id
         if (!(replicationAcks contains id)) {
-          s ! OperationAck(id)
+          clientRef ! OperationAck(id)
         }
       }
       case None =>

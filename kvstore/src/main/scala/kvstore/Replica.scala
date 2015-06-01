@@ -53,18 +53,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props)
    */
   
   var cache = Map.empty[String, String]
-  // a map from secondary replicas to replicators
-  var secondaryReplicaToReplicatorMap = Map.empty[ActorRef, ActorRef]
-  // the current set of replicators
-  var secondaryReplicatorRefSet = Set.empty[ActorRef]
+
 
 
   val persistor = context.system.actorOf(persistenceProps)
   context.watch(persistor)
 
-  var counter = 0
 
-  var primaryPersistingAcks = Map.empty[Long, (ActorRef, Cancellable)]
   //Key is id of the operation: insert, remove, get
   //Value is (ClientRef, NumberOfSecondaryRefs at point of replication request to replicator)
   var replicationAcks = Map.empty[Long, (ActorRef, Long)]
@@ -74,8 +69,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props)
   arbiter ! Join
 
 
-  var expectedSeq = 0L
-  var secondaryPersistingAcks = Map.empty[Long, (ActorRef, Cancellable)]
+
 
 
   def receive = LoggingReceive {

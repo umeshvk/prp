@@ -1,13 +1,13 @@
 package kvstore
 
+import akka.actor.{Cancellable, ActorRef}
 import akka.event.LoggingReceive
 import kvstore.Persistence.{Persisted, Persist}
 import kvstore.Replicator.{SnapshotAck, Snapshot}
+import scala.collection.immutable.Set
 import scala.concurrent.duration._
 import scala.language.postfixOps
-/**
- * Created by umesh on 5/31/15.
- */
+
 trait Secondary {
 
   this: Replica =>
@@ -16,6 +16,15 @@ trait Secondary {
   import Replicator._
   import Persistence._
   import context.dispatcher
+
+
+  // a map from secondary replicas to replicators
+  var secondaryReplicaToReplicatorMap = Map.empty[ActorRef, ActorRef]
+  // the current set of replicators
+  var secondaryReplicatorRefSet = Set.empty[ActorRef]
+
+  var expectedSeq = 0L
+  var secondaryPersistingAcks = Map.empty[Long, (ActorRef, Cancellable)]
 
 
   /* TODO Behavior for the replica role. */
